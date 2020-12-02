@@ -349,7 +349,7 @@
       repo: https://github.com/gabrielztk/tasks
       dest: /home/ubuntu/tasks
 
-  - name: Template a file to /etc/file.conf
+  - name: Template a exports.sh to /home/ubuntu/tasks/exports.sh
     template:
       src: exports.sh.j2
       dest: /home/ubuntu/tasks/exports.sh
@@ -425,11 +425,21 @@
       region: "{{ region_1 }}" 
     register: sub_nets
 
+
+  - name: Lista ids das subnets
+    set_fact:
+      subnets_ids: "{{ sub_nets.subnets | map(attribute='id') | select('string') | list }}"
+
   
   - name: Gather information about all availability zones
     amazon.aws.aws_az_info:
       region: "{{ region_1 }}"
     register: availability_zones
+
+
+  - name: Lista zone_name das availability_zones
+    set_fact:
+      availability_zones_zone_names: "{{ availability_zones.availability_zones | map(attribute='zone_name') | select('string') | list }}"
 
 
   - name: Create a target group with a default health check
@@ -449,7 +459,7 @@
       name: "{{ elastic_load_balancer_name }}"
       region: "{{ region_1 }}" 
       security_groups: [ "{{ ori_security_group }}" ]
-      subnets: [ "{{ sub_nets.subnets[0].id }}", "{{ sub_nets.subnets[1].id }}", "{{ sub_nets.subnets[2].id }}", "{{ sub_nets.subnets[3].id }}", "{{ sub_nets.subnets[4].id }}", "{{ sub_nets.subnets[5].id }}" ]
+      subnets: "{{ subnets_ids }}"
       listeners:
         - Protocol: HTTP 
           Port: 80 
@@ -460,6 +470,10 @@
       state: present
     register: elastic_load_balancer
 
+
+  - name: create some file
+    template: src=./pycli/pycli/url.py.j2 dest=./pycli/pycli/url.py
+    delegate_to: localhost
 
 
   - name: Create launch configuration
@@ -477,12 +491,12 @@
       name: "{{ auto_scaling_name }}"
       region: "{{ region_1 }}"
       target_group_arns: [ "{{ target_group.target_group_arn }}" ]
-      availability_zones: [ "{{ availability_zones.availability_zones[0].zone_name }}", "{{ availability_zones.availability_zones[1].zone_name }}", "{{ availability_zones.availability_zones[2].zone_name }}", "{{ availability_zones.availability_zones[3].zone_name }}", "{{ availability_zones.availability_zones[4].zone_name }}", "{{ availability_zones.availability_zones[5].zone_name }}" ]
+      availability_zones: "{{ availability_zones_zone_names }}"
       launch_config_name: "{{ launch_configuration }}"
       min_size: 2
       max_size: 4
       desired_capacity: 2
-      vpc_zone_identifier: [ "{{ sub_nets.subnets[0].id }}", "{{ sub_nets.subnets[1].id }}", "{{ sub_nets.subnets[2].id }}", "{{ sub_nets.subnets[3].id }}", "{{ sub_nets.subnets[4].id }}", "{{ sub_nets.subnets[5].id }}" ]
+      vpc_zone_identifier: "{{ subnets_ids }}"
       tags:
         - environment: production
 
