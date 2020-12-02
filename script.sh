@@ -1,4 +1,5 @@
 #!/bin/sh
+sudo apt update
 sudo apt install postgresql postgresql-contrib -y
 sudo -u postgres psql -c "CREATE USER cloud WITH PASSWORD 'cloud';"
 sudo -u postgres createdb -O cloud tasks

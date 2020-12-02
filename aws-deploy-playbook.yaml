@@ -3,6 +3,7 @@
   gather_facts: False
 
   vars:
+
     region_1: us-east-1
     region_2: us-east-2
     instance_type: t2.micro
@@ -21,13 +22,11 @@
     auto_scaling_name: "{{ ori_name }}ASG"
     elastic_load_balancer_name: "{{ ori_name }}ELB"
 
-
   tasks:
 
 #   # - name: Debug instance id2
 #   #   debug:
 #   #     msg: "{{ item }}"
-
 
   - name: get instance info - DB
     community.aws.ec2_instance_info:
@@ -180,7 +179,6 @@
       state: absent
     with_items: "{{ ami_info.images }}"
 
-
   - name: get instance info - ORI
     community.aws.ec2_instance_info:
       region: "{{ region_1 }}"
@@ -263,7 +261,6 @@
       groupname: ec2_instance_ips
     with_items: "{{ ec2_ori_instance_ips.instances }}"
 
-
   - name: Wait for the instances to boot by checking the ssh port
     wait_for: 
       host: "{{item.public_ip}}"
@@ -312,7 +309,6 @@
   - name: Upgrade the OS (apt-get dist-upgrade)
     apt:
       upgrade: dist
-
 
   - name: Run script on remote DB machine
     script: script.sh
@@ -366,7 +362,6 @@
 
   - name: reboot machine
     reboot:
-
 
 - hosts: localhost
   gather_facts: False
@@ -490,6 +485,7 @@
       vpc_zone_identifier: [ "{{ sub_nets.subnets[0].id }}", "{{ sub_nets.subnets[1].id }}", "{{ sub_nets.subnets[2].id }}", "{{ sub_nets.subnets[3].id }}", "{{ sub_nets.subnets[4].id }}", "{{ sub_nets.subnets[5].id }}" ]
       tags:
         - environment: production
+
         - Name: "{{ ori_name }}"
         - Owner: "{{ project_owner }}"
     register: auto_scaling_group
