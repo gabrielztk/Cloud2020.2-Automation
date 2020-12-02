@@ -1,0 +1,515 @@
+---
+- hosts: localhost
+  gather_facts: False
+
+  vars:
+    region_1: us-east-1
+    region_2: us-east-2
+    instance_type: t2.micro
+    ami_id_r1: ami-0817d428a6fb68645
+    ami_id_r2: ami-0dd9f0e7df0f0a138
+    project_name: AutoDeployTest
+    project_owner: Zanetti
+    ori_name: "{{ project_name }}ORI"
+    db_name: "{{ project_name }}DB"
+    ori_security_group: "{{ ori_name }}SecGroup"
+    db_security_group: "{{ db_name }}SecGroup"
+    key_name: "{{ project_name }}Key"
+    ami_name: "{{ ori_name }}Ami"
+    target_group_name: "{{ ori_name }}TG"
+    launch_configuration: "{{ ori_name }}LC"
+    auto_scaling_name: "{{ ori_name }}ASG"
+    elastic_load_balancer_name: "{{ ori_name }}ELB"
+
+
+  tasks:
+
+#   # - name: Debug instance id2
+#   #   debug:
+#   #     msg: "{{ item }}"
+
+
+  - name: get instance info - DB
+    community.aws.ec2_instance_info:
+      region: "{{ region_2 }}"
+      filters:
+        instance-state-name: [ "running" ]
+        "tag:Name": "{{ db_name }}"
+    register: ec2_instances
+
+
+  - name: terminate instances - DB
+    ec2:
+      region: "{{ region_2 }}"  
+      wait: yes  
+      instance_ids: "{{ item.instance_id }}" 
+      state: absent  
+    with_items: "{{ ec2_instances.instances }}"
+
+
+  - name: Create a new EC2 key - Region-2
+    ec2_key:
+          name: "{{ key_name }}"
+          region: "{{ region_2 }}"
+          key_material: "{{ lookup('file', '/home/gabriel/.ssh/id_rsa.pub') }}"
+
+
+  - name: Setting up Security/Firewall Group - DB (Postgres)
+    ec2_group:
+      name: "{{ db_security_group }}"
+      description: Rules to allow ssh on port 22 and webtrafic on port 8080 & 80
+      region: "{{ region_2 }}"
+      rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 5432
+        to_port: 5432
+        cidr_ip: 0.0.0.0/0
+      rules_egress:
+      - proto: all
+        cidr_ip: 0.0.0.0/0
+    register: db_sec_group
+
+
+  - name: Gather subnets
+    amazon.aws.ec2_vpc_subnet_info:
+      region: "{{ region_2 }}" 
+    register: sub_nets
+
+
+  - name: Deploy EC2 Instance - DB
+    ec2:
+      key_name: "{{ key_name }}"
+      region: "{{ region_2 }}"
+      instance_type: "{{ instance_type }}"
+      image: "{{ ami_id_r2 }}"
+      wait: yes
+      wait_timeout: 500
+      exact_count: 1
+      count_tag:
+        Name: "{{ db_name }}"
+      instance_tags:
+        Name: "{{ db_name }}"
+        Owner: "{{ project_owner }}"
+      monitoring: no
+      vpc_subnet_id: "{{ sub_nets.subnets[0].id }}"
+      assign_public_ip: yes
+      group_id: "{{ db_sec_group.group_id }}"
+    register: ec2_db_instance_ips
+
+
+  - name: Store EC2 instance IPs to provision against
+    add_host:
+      hostname: "{{ item.public_ip }}"
+      groupname: ec2_db_instance_ips
+    with_items: "{{ ec2_db_instance_ips.instances }}"
+
+
+  - name: Wait for the instances to boot by checking the ssh port
+    wait_for: 
+      host: "{{item.public_ip}}"
+      port: 22 
+      delay: 30 
+      timeout: 300 
+      state: started
+    with_items: "{{ ec2_db_instance_ips.instances }}"
+
+
+  - name: Add EC2 instances as known hosts
+    known_hosts:
+      name: "{{ item.public_ip }}"
+      key: "{{ lookup('pipe', 'ssh-keyscan -t rsa ' + item.public_ip) }}"
+    with_items: "{{ ec2_db_instance_ips.tagged_instances }}"
+
+
+  - name: Setting facts so that they will be persisted in the fact cache
+    set_fact:
+      db_ip: "{{ ec2_db_instance_ips.instances[0].public_ip }}"
+      cacheable: yes
+
+
+#####################################################################
+
+  - name: Delete ELB
+    community.aws.elb_application_lb:
+      name: "{{ elastic_load_balancer_name }}"
+      region: "{{ region_1 }}" 
+      wait: yes
+      state: absent
+
+
+  - name: Delete Auto Scaling Group
+    community.aws.ec2_asg:
+      name: "{{ auto_scaling_name }}"
+      region: "{{ region_1 }}"
+      state: absent
+
+
+  - name: Delete target group
+    community.aws.elb_target_group:
+      name: "{{ target_group_name }}"
+      region: "{{ region_1 }}" 
+      wait: yes
+      state: absent
+
+
+  - name: Delete launch configuration
+    community.aws.ec2_lc:
+      name: "{{ launch_configuration }}"
+      region: "{{ region_1 }}" 
+      state: absent
+
+
+  - name: get ami info
+    amazon.aws.ec2_ami_info:
+      region: "{{ region_1 }}"
+      owner: self
+      filters:
+        name: "{{ ami_name }}"
+    register: ami_info
+
+
+  - name: delete ami
+    amazon.aws.ec2_ami:
+      region: "{{ region_1 }}"
+      image_id: "{{ item.image_id }}"
+      delete_snapshot: yes
+      state: absent
+    with_items: "{{ ami_info.images }}"
+
+
+  - name: get instance info - ORI
+    community.aws.ec2_instance_info:
+      region: "{{ region_1 }}"
+      filters:
+        instance-state-name: [ "running" ]
+        "tag:Name": "{{ ori_name }}"
+    register: ec2_instances
+
+
+  - name: terminate instances - ORI
+    ec2:
+      region: "{{ region_1 }}"  
+      wait: yes  
+      instance_ids: "{{ item.instance_id }}" 
+      state: absent  
+    with_items: "{{ ec2_instances.instances }}"
+
+
+  - name: Create a new EC2 key - Region-1
+    ec2_key:
+          name: "{{ key_name }}"
+          region: "{{ region_1 }}"
+          key_material: "{{ lookup('file', '/home/gabriel/.ssh/id_rsa.pub') }}"
+
+
+  - name: Setting up Security/Firewall Group - ORI
+    ec2_group:
+      name: "{{ ori_security_group }}"
+      description: Rules to allow ssh on port 22 and webtrafic on port 8080 & 80
+      region: "{{ region_1 }}"
+      rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 8080
+        to_port: 8080
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      rules_egress:
+      - proto: all
+        cidr_ip: 0.0.0.0/0
+    register: ori_sec_group
+
+
+  - name: Gather subnets
+    amazon.aws.ec2_vpc_subnet_info:
+      region: "{{ region_1 }}" 
+    register: sub_nets
+
+
+  - name: Deploy EC2 Instance - Django
+    ec2:
+      key_name: "{{ key_name }}"
+      region: "{{ region_1 }}"
+      instance_type: "{{ instance_type }}"
+      image: "{{ ami_id_r1 }}"
+      wait: yes
+      wait_timeout: 500
+      exact_count: 1
+      count_tag:
+        Name: "{{ ori_name }}"
+      instance_tags:
+        Name: "{{ ori_name }}"
+        Owner: "{{ project_owner }}"
+      monitoring: no
+      vpc_subnet_id: "{{ sub_nets.subnets[0].id }}"
+      assign_public_ip: yes
+      group_id: "{{ ori_sec_group.group_id }}"
+    register: ec2_ori_instance_ips
+
+
+  - name: Store EC2 instance IPs to provision against
+    add_host:
+      hostname: "{{ item.public_ip }}"
+      groupname: ec2_instance_ips
+    with_items: "{{ ec2_ori_instance_ips.instances }}"
+
+
+  - name: Wait for the instances to boot by checking the ssh port
+    wait_for: 
+      host: "{{item.public_ip}}"
+      port: 22 
+      delay: 30 
+      timeout: 300 
+      state: started
+    with_items: "{{ ec2_ori_instance_ips.instances }}"
+
+
+  - name: Add EC2 instances as known hosts
+    known_hosts:
+      name: "{{ item.public_ip }}"
+      key: "{{ lookup('pipe', 'ssh-keyscan -t rsa ' + item.public_ip) }}"
+    with_items: "{{ ec2_ori_instance_ips.tagged_instances }}"
+
+
+  - name: Setting facts so that they will be persisted in the fact cache
+    set_fact:
+      ori_ip: "{{ ec2_ori_instance_ips.instances[0].public_ip }}"
+      cacheable: yes
+
+############################################
+
+- hosts: ec2_db_instance_ips
+  gather_facts: False
+  remote_user: ubuntu
+  become: True
+  become_user: root
+
+  tasks:
+
+  # - name: Debug instance id2
+  #   debug:
+  #     msg: "{{ hostvars['localhost'].db_ip }}"
+
+  - name: Run apt-get update
+    apt:
+      update_cache: yes
+
+  - name: Update all packages to their latest version
+    apt:
+      name: "*"
+      state: latest
+
+  - name: Upgrade the OS (apt-get dist-upgrade)
+    apt:
+      upgrade: dist
+
+
+  - name: Run script on remote DB machine
+    script: script.sh
+
+#######################################
+
+
+- hosts: ec2_instance_ips
+  gather_facts: False
+  remote_user: ubuntu
+  become: True
+  become_user: root
+
+  vars:
+    DJANGO_SUPERUSER_PASSWORD: cloud
+    DJANGO_SUPERUSER_USERNAME: cloud
+    DJANGO_SUPERUSER_EMAIL: cloud@a.com
+    POSTGRES_USER: cloud
+    POSTGRES_PASSWORD: cloud
+
+  tasks:
+
+  - name: Run apt-get update
+    apt:
+      update_cache: yes
+
+  - name: Update all packages to their latest version
+    apt:
+      name: "*"
+      state: latest
+
+  - name: Upgrade the OS (apt-get dist-upgrade)
+    apt:
+      upgrade: dist
+
+  - name: git cloning
+    git:
+      repo: https://github.com/gabrielztk/tasks
+      dest: /home/ubuntu/tasks
+
+  - name: Template a file to /etc/file.conf
+    template:
+      src: exports.sh.j2
+      dest: /home/ubuntu/tasks/exports.sh
+      mode: u=rwx,g=rx,o=rx
+
+  - name: Install e setup Django
+    command: ./install.sh
+    args:
+      chdir: /home/ubuntu/tasks
+
+  - name: reboot machine
+    reboot:
+
+
+- hosts: localhost
+  gather_facts: False
+
+  vars:
+    region_1: us-east-1
+    region_2: us-east-2
+    instance_type: t2.micro
+    ami_id_r1: ami-0817d428a6fb68645
+    ami_id_r2: ami-0dd9f0e7df0f0a138
+    project_name: AutoDeployTest
+    project_owner: Zanetti
+    ori_name: "{{ project_name }}ORI"
+    db_name: "{{ project_name }}DB"
+    ori_security_group: "{{ ori_name }}SecGroup"
+    db_security_group: "{{ db_name }}SecGroup"
+    key_name: "{{ project_name }}Key"
+    ami_name: "{{ ori_name }}Ami"
+    target_group_name: "{{ ori_name }}TG"
+    launch_configuration: "{{ ori_name }}LC"
+    auto_scaling_name: "{{ ori_name }}ASG"
+    elastic_load_balancer_name: "{{ ori_name }}ELB"
+
+  
+  tasks:
+
+  - name: get instance id
+    community.aws.ec2_instance_info:
+      region: "{{ region_1 }}"
+      filters:
+        instance-state-name: [ "running" ]
+        "tag:Name": "{{ ori_name }}"
+    register: ec2_instances
+
+  - name: create ami
+    ec2_ami:
+      instance_id: "{{ ec2_instances.instances[0].instance_id }}"
+      region: "{{ region_1 }}"
+      wait: yes
+      name: "{{ ami_name }}"
+    register: ami_info
+    when: ec2_instances.instances[0].instance_id!="None"
+
+
+  - name: terminate instances
+    ec2:
+      region: "{{ region_1 }}"  
+      wait: yes  
+      instance_ids: "{{ item.instance_id }}" 
+      state: absent  
+    with_items: "{{ ec2_instances.instances }}"
+
+  - name: Get VPC
+    amazon.aws.ec2_vpc_net_info:
+      region: "{{ region_1 }}" 
+    register: vpc
+
+
+  - name: Gather subnets
+    amazon.aws.ec2_vpc_subnet_info:
+      region: "{{ region_1 }}" 
+    register: sub_nets
+
+  
+  - name: Gather information about all availability zones
+    amazon.aws.aws_az_info:
+      region: "{{ region_1 }}"
+    register: availability_zones
+
+
+  - name: Create a target group with a default health check
+    community.aws.elb_target_group:
+      name: "{{ target_group_name }}"
+      region: "{{ region_1 }}" 
+      protocol: http
+      port: 8080
+      vpc_id: "{{ vpc.vpcs[0].id }}"
+      wait: yes
+      state: present
+    register: target_group
+
+
+  - name: Create an ELB and attach a listener
+    community.aws.elb_application_lb:
+      name: "{{ elastic_load_balancer_name }}"
+      region: "{{ region_1 }}" 
+      security_groups: [ "{{ ori_security_group }}" ]
+      subnets: [ "{{ sub_nets.subnets[0].id }}", "{{ sub_nets.subnets[1].id }}", "{{ sub_nets.subnets[2].id }}", "{{ sub_nets.subnets[3].id }}", "{{ sub_nets.subnets[4].id }}", "{{ sub_nets.subnets[5].id }}" ]
+      listeners:
+        - Protocol: HTTP 
+          Port: 80 
+          DefaultActions:
+            - Type: forward 
+              TargetGroupName: "{{ target_group_name }}"
+      wait: yes
+      state: present
+    register: elastic_load_balancer
+
+
+
+  - name: Create launch configuration
+    community.aws.ec2_lc:
+      name: "{{ launch_configuration }}"
+      region: "{{ region_1 }}" 
+      image_id: "{{ ami_info.image_id }}"
+      key_name: "{{ key_name }}"
+      security_groups: [ "{{ ori_security_group }}" ]
+      instance_type: t2.micro
+
+  
+  - name: Auto Scaling Group
+    community.aws.ec2_asg:
+      name: "{{ auto_scaling_name }}"
+      region: "{{ region_1 }}"
+      target_group_arns: [ "{{ target_group.target_group_arn }}" ]
+      availability_zones: [ "{{ availability_zones.availability_zones[0].zone_name }}", "{{ availability_zones.availability_zones[1].zone_name }}", "{{ availability_zones.availability_zones[2].zone_name }}", "{{ availability_zones.availability_zones[3].zone_name }}", "{{ availability_zones.availability_zones[4].zone_name }}", "{{ availability_zones.availability_zones[5].zone_name }}" ]
+      launch_config_name: "{{ launch_configuration }}"
+      min_size: 2
+      max_size: 4
+      desired_capacity: 2
+      vpc_zone_identifier: [ "{{ sub_nets.subnets[0].id }}", "{{ sub_nets.subnets[1].id }}", "{{ sub_nets.subnets[2].id }}", "{{ sub_nets.subnets[3].id }}", "{{ sub_nets.subnets[4].id }}", "{{ sub_nets.subnets[5].id }}" ]
+      tags:
+        - environment: production
+        - Name: "{{ ori_name }}"
+        - Owner: "{{ project_owner }}"
+    register: auto_scaling_group
+
+  # Tentei fazer mas resource_id complicou
+
+  # - name: Create target tracking scaling policy for ECS Service
+  #   community.aws.aws_application_scaling_policy:
+  #     state: present
+  #     region: "{{ region_1 }}"
+  #     policy_name: test_policy
+  #     service_namespace: ecs
+  #     scalable_dimension: ecs:service:DesiredCount
+  #     resource_id: service/default/sample-webapp
+  #     policy_type: TargetTrackingScaling
+  #     minimum_tasks: 1
+  #     maximum_tasks: 6
+  #     target_tracking_scaling_policy_configuration:
+  #       TargetValue: 60
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
+  #       ScaleOutCooldown: 60
+  #       ScaleInCooldown: 60
